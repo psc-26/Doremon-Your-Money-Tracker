@@ -6,6 +6,7 @@ export interface Expense {
   reason: string;
   timestamp: number;
   category: Category;
+  aiSuggestion?: Category;
   rawText?: string;
 }
 

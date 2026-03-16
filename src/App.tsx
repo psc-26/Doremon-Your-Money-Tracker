@@ -19,9 +19,14 @@ import {
   Pie, 
   Cell, 
   ResponsiveContainer, 
-  Tooltip
+  Tooltip,
+  BarChart,
+  Bar,
+  XAxis,
+  YAxis,
+  CartesianGrid
 } from 'recharts';
-import { format, isSameDay, isSameWeek, isSameMonth, isSameYear } from 'date-fns';
+import { format, isSameDay, isSameWeek, isSameMonth, isSameYear, startOfDay, subDays } from 'date-fns';
 import { motion, AnimatePresence } from 'motion/react';
 import { parseExpense, getSpendingInsight } from './services/geminiService';
 import { Expense, Category } from './types';
@@ -50,6 +55,7 @@ export default function App() {
   const [showReview, setShowReview] = useState(false);
   const [insight, setInsight] = useState<string>('');
   const [isInsightLoading, setIsInsightLoading] = useState(false);
+  const [currentView, setCurrentView] = useState<'home' | 'trends' | 'stats' | 'history'>('home');
 
   useEffect(() => {
     localStorage.setItem('zenz_expenses', JSON.stringify(expenses));
@@ -82,11 +88,14 @@ export default function App() {
         amount: parsed.amount,
         reason: parsed.reason,
         timestamp: parsed.timestamp,
-        category: parsed.suggestedCategory || 'pending',
+        category: 'pending',
+        aiSuggestion: parsed.suggestedCategory,
         rawText: inputText
       };
       setExpenses(prev => [newExpense, ...prev]);
       setInputText('');
+      // Automatically show review if it's the first pending one or just to prompt user
+      setShowReview(true);
     }
   };
 
@@ -122,6 +131,27 @@ export default function App() {
     return { total, byCategory, chartData };
   }, [filteredExpenses]);
 
+  const trendData = useMemo(() => {
+    const last7Days = Array.from({ length: 7 }, (_, i) => {
+      const d = subDays(new Date(), i);
+      return {
+        date: format(d, 'MMM dd'),
+        timestamp: startOfDay(d).getTime(),
+        amount: 0
+      };
+    }).reverse();
+
+    expenses.forEach(ex => {
+      const exDate = startOfDay(new Date(ex.timestamp)).getTime();
+      const day = last7Days.find(d => d.timestamp === exDate);
+      if (day) {
+        day.amount += ex.amount;
+      }
+    });
+
+    return last7Days;
+  }, [expenses]);
+
   const pendingCount = expenses.filter(ex => ex.category === 'pending').length;
 
   const greeting = useMemo(() => {
@@ -130,6 +160,422 @@ export default function App() {
     if (hour < 18) return 'Good Afternoon';
     return 'Evening Vibe';
   }, []);
+
+  const statsByDay = useMemo(() => {
+    const days: Record<string, number> = {};
+    expenses.forEach(ex => {
+      const day = format(ex.timestamp, 'EEEE');
+      days[day] = (days[day] || 0) + ex.amount;
+    });
+    return Object.entries(days).map(([name, value]) => ({ name, value }));
+  }, [expenses]);
+
+  const renderHome = () => (
+    <>
+      {/* AI Input */}
+      <section className="glass-card p-6 neon-shadow-green">
+        <form onSubmit={handleAddExpense} className="space-y-4">
+          <div className="flex items-center gap-2 mb-2">
+            <Sparkles className="w-4 h-4 text-neon-green" />
+            <span className="text-xs font-bold uppercase tracking-tighter text-neon-green">AI Agent Ready</span>
+          </div>
+          <div className="relative">
+            <input
+              type="text"
+              value={inputText}
+              onChange={(e) => setInputText(e.target.value)}
+              placeholder="e.g., Spent 200 on coffee at Starbucks"
+              className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 focus:outline-none focus:border-neon-green transition-all"
+              disabled={isParsing}
+            />
+            <button
+              type="submit"
+              disabled={isParsing || !inputText}
+              className="absolute right-2 top-2 bottom-2 px-6 bg-neon-green text-black font-bold rounded-xl hover:scale-105 active:scale-95 transition-all disabled:opacity-50 disabled:scale-100"
+            >
+              {isParsing ? '...' : <Plus className="w-6 h-6" />}
+            </button>
+          </div>
+          <p className="text-[10px] text-white/30 font-mono">PROMPT: AMOUNT + REASON + TIME</p>
+        </form>
+      </section>
+
+      {/* AI Insight Section */}
+      <section className="glass-card p-6 border-neon-pink/30 relative overflow-hidden group">
+        <div className="absolute top-0 right-0 p-2">
+          <Sparkles className="w-4 h-4 text-neon-pink animate-pulse" />
+        </div>
+        <div className="flex items-center gap-3 mb-4">
+          <div className="w-8 h-8 rounded-full bg-neon-pink/20 flex items-center justify-center">
+            <Sparkles className="w-4 h-4 text-neon-pink" />
+          </div>
+          <h3 className="text-sm font-bold uppercase tracking-widest text-neon-pink">Doremon's Tea ☕</h3>
+        </div>
+        <div className="min-h-[60px] flex items-center">
+          {isInsightLoading ? (
+            <div className="flex gap-1">
+              <div className="w-2 h-2 bg-neon-pink rounded-full animate-bounce" />
+              <div className="w-2 h-2 bg-neon-pink rounded-full animate-bounce [animation-delay:0.2s]" />
+              <div className="w-2 h-2 bg-neon-pink rounded-full animate-bounce [animation-delay:0.4s]" />
+            </div>
+          ) : (
+            <p className="text-lg font-medium leading-relaxed italic">
+              "{insight || "Add some expenses to get the tea, bestie! 💅"}"
+            </p>
+          )}
+        </div>
+        <button 
+          onClick={fetchInsight}
+          disabled={isInsightLoading}
+          className="mt-4 text-[10px] font-bold uppercase tracking-widest text-white/40 hover:text-neon-pink transition-colors flex items-center gap-1"
+        >
+          Refresh Insight <ChevronRight className="w-3 h-3" />
+        </button>
+      </section>
+
+      {/* Quick Stats Summary */}
+      <section className="glass-card p-6 grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
+        <div className="h-48 relative">
+          {stats.chartData.length > 0 ? (
+            <ResponsiveContainer width="100%" height="100%">
+              <PieChart>
+                <Pie
+                  data={stats.chartData}
+                  innerRadius={60}
+                  outerRadius={80}
+                  paddingAngle={5}
+                  dataKey="value"
+                >
+                  {stats.chartData.map((entry, index) => (
+                    <Cell key={`cell-${index}`} fill={entry.color} />
+                  ))}
+                </Pie>
+                <Tooltip 
+                  contentStyle={{ backgroundColor: '#111', border: 'none', borderRadius: '12px', color: '#fff' }}
+                  itemStyle={{ color: '#fff' }}
+                />
+              </PieChart>
+            </ResponsiveContainer>
+          ) : (
+            <div className="absolute inset-0 flex items-center justify-center text-white/20 text-xs uppercase font-bold">
+              No Data Yet
+            </div>
+          )}
+          <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+            <span className="text-[10px] uppercase text-white/40">Today</span>
+            <span className="text-lg font-bold">₹{stats.total}</span>
+          </div>
+        </div>
+        
+        <div className="space-y-4">
+          <div className="flex items-center justify-between p-3 rounded-2xl bg-neon-green/10 border border-neon-green/20">
+            <div className="flex items-center gap-2">
+              <CheckCircle2 className="w-4 h-4 text-neon-green" />
+              <span className="text-sm font-medium">Genuine</span>
+            </div>
+            <span className="font-bold">₹{stats.byCategory.genuine || 0}</span>
+          </div>
+          <div className="flex items-center justify-between p-3 rounded-2xl bg-neon-yellow/10 border border-neon-yellow/20">
+            <div className="flex items-center gap-2">
+              <AlertCircle className="w-4 h-4 text-neon-yellow" />
+              <span className="text-sm font-medium">Avoidable</span>
+            </div>
+            <span className="font-bold">₹{stats.byCategory.avoidable || 0}</span>
+          </div>
+          <div className="flex items-center justify-between p-3 rounded-2xl bg-neon-pink/10 border border-neon-pink/20">
+            <div className="flex items-center gap-2">
+              <XCircle className="w-4 h-4 text-neon-pink" />
+              <span className="text-sm font-medium">Unnecessary</span>
+            </div>
+            <span className="font-bold">₹{stats.byCategory.unnecessary || 0}</span>
+          </div>
+        </div>
+      </section>
+
+      {/* Recent Activity */}
+      <section className="space-y-4">
+        <div className="flex items-center justify-between">
+          <h2 className="text-lg font-bold flex items-center gap-2">
+            <History className="w-5 h-5 text-neon-green" />
+            Recent Activity
+          </h2>
+          <div className="flex items-center gap-4">
+            {pendingCount > 0 && (
+              <button 
+                onClick={() => setShowReview(true)}
+                className="text-[10px] font-bold uppercase tracking-widest px-3 py-1 bg-neon-pink text-white rounded-full animate-pulse"
+              >
+                {pendingCount} Pending Review
+              </button>
+            )}
+            <button 
+              onClick={() => setCurrentView('history')}
+              className="text-[10px] font-bold uppercase tracking-widest text-white/40 hover:text-neon-green transition-colors"
+            >
+              View All
+            </button>
+          </div>
+        </div>
+        <div className="space-y-3">
+          <AnimatePresence mode="popLayout">
+            {expenses.slice(0, 5).map((expense) => (
+              <motion.div
+                layout
+                initial={{ opacity: 0, y: 20 }}
+                animate={{ opacity: 1, y: 0 }}
+                exit={{ opacity: 0, scale: 0.95 }}
+                key={expense.id}
+                className="glass-card p-4 flex items-center justify-between group hover:bg-white/10 transition-colors"
+              >
+                <div className="flex items-center gap-4">
+                  <div className={cn(
+                    "w-2 h-12 rounded-full",
+                    expense.category === 'genuine' && "bg-neon-green",
+                    expense.category === 'avoidable' && "bg-neon-yellow",
+                    expense.category === 'unnecessary' && "bg-neon-pink",
+                    expense.category === 'pending' && "bg-white/20"
+                  )} />
+                  <div>
+                    <p className="font-bold text-lg">{expense.reason}</p>
+                    <p className="text-xs text-white/40 font-mono">
+                      {format(expense.timestamp, 'hh:mm a • MMM dd')}
+                    </p>
+                  </div>
+                </div>
+                <div className="text-right">
+                  <p className="text-xl font-bold">₹{expense.amount}</p>
+                  <div className="flex gap-1 mt-1">
+                    {expense.category === 'pending' ? (
+                      <div className="flex gap-1">
+                        <button 
+                          onClick={() => updateCategory(expense.id, 'genuine')} 
+                          className={cn(
+                            "p-1.5 rounded-lg transition-all",
+                            expense.aiSuggestion === 'genuine' ? "bg-neon-green/20 text-neon-green border border-neon-green/50" : "hover:text-neon-green"
+                          )}
+                        >
+                          <CheckCircle2 className="w-4 h-4" />
+                        </button>
+                        <button 
+                          onClick={() => updateCategory(expense.id, 'avoidable')} 
+                          className={cn(
+                            "p-1.5 rounded-lg transition-all",
+                            expense.aiSuggestion === 'avoidable' ? "bg-neon-yellow/20 text-neon-yellow border border-neon-yellow/50" : "hover:text-neon-yellow"
+                          )}
+                        >
+                          <AlertCircle className="w-4 h-4" />
+                        </button>
+                        <button 
+                          onClick={() => updateCategory(expense.id, 'unnecessary')} 
+                          className={cn(
+                            "p-1.5 rounded-lg transition-all",
+                            expense.aiSuggestion === 'unnecessary' ? "bg-neon-pink/20 text-neon-pink border border-neon-pink/50" : "hover:text-neon-pink"
+                          )}
+                        >
+                          <XCircle className="w-4 h-4" />
+                        </button>
+                      </div>
+                    ) : (
+                      <span className={cn(
+                        "text-[8px] uppercase font-black tracking-tighter px-2 py-0.5 rounded",
+                        expense.category === 'genuine' && "bg-neon-green text-black",
+                        expense.category === 'avoidable' && "bg-neon-yellow text-black",
+                        expense.category === 'unnecessary' && "bg-neon-pink text-white"
+                      )}>
+                        {expense.category}
+                      </span>
+                    )}
+                  </div>
+                </div>
+              </motion.div>
+            ))}
+          </AnimatePresence>
+        </div>
+      </section>
+    </>
+  );
+
+  const renderTrends = () => (
+    <div className="space-y-8">
+      <section className="glass-card p-6">
+        <h2 className="text-lg font-bold mb-6 flex items-center gap-2">
+          <TrendingUp className="w-5 h-5 text-neon-green" />
+          Last 7 Days Spending
+        </h2>
+        <div className="h-64 w-full">
+          <ResponsiveContainer width="100%" height="100%">
+            <BarChart data={trendData}>
+              <CartesianGrid strokeDasharray="3 3" stroke="#333" vertical={false} />
+              <XAxis 
+                dataKey="date" 
+                stroke="#666" 
+                fontSize={10} 
+                tickLine={false} 
+                axisLine={false} 
+              />
+              <YAxis 
+                stroke="#666" 
+                fontSize={10} 
+                tickLine={false} 
+                axisLine={false} 
+                tickFormatter={(value) => `₹${value}`}
+              />
+              <Tooltip 
+                cursor={{ fill: 'rgba(255,255,255,0.05)' }}
+                contentStyle={{ backgroundColor: '#111', border: 'none', borderRadius: '12px', color: '#fff' }}
+              />
+              <Bar dataKey="amount" fill="#00FF00" radius={[4, 4, 0, 0]} />
+            </BarChart>
+          </ResponsiveContainer>
+        </div>
+      </section>
+
+      <section className="glass-card p-6">
+        <h2 className="text-lg font-bold mb-6">Spending by Day</h2>
+        <div className="space-y-4">
+          {statsByDay.map((day) => (
+            <div key={day.name} className="space-y-2">
+              <div className="flex justify-between text-xs font-bold uppercase tracking-widest">
+                <span>{day.name}</span>
+                <span>₹{day.value}</span>
+              </div>
+              <div className="h-2 w-full bg-white/5 rounded-full overflow-hidden">
+                <motion.div 
+                  initial={{ width: 0 }}
+                  animate={{ width: `${(day.value / Math.max(...statsByDay.map(d => d.value))) * 100}%` }}
+                  className="h-full bg-neon-green"
+                />
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+
+  const renderStats = () => (
+    <div className="space-y-8">
+      <div className="flex gap-2 overflow-x-auto pb-2 custom-scrollbar">
+        {['daily', 'weekly', 'monthly', 'yearly'].map((tab) => (
+          <button
+            key={tab}
+            onClick={() => setActiveTab(tab as any)}
+            className={cn(
+              "px-6 py-2 rounded-full text-xs font-bold uppercase tracking-widest border transition-all whitespace-nowrap",
+              activeTab === tab 
+                ? "bg-white text-black border-white" 
+                : "bg-transparent text-white/50 border-white/10 hover:border-white/30"
+            )}
+          >
+            {tab}
+          </button>
+        ))}
+      </div>
+
+      <section className="glass-card p-6">
+        <h2 className="text-lg font-bold mb-6 flex items-center gap-2">
+          <PieChartIcon className="w-5 h-5 text-neon-green" />
+          Category Breakdown
+        </h2>
+        <div className="h-64 relative">
+          <ResponsiveContainer width="100%" height="100%">
+            <PieChart>
+              <Pie
+                data={stats.chartData}
+                innerRadius={70}
+                outerRadius={90}
+                paddingAngle={5}
+                dataKey="value"
+              >
+                {stats.chartData.map((entry, index) => (
+                  <Cell key={`cell-${index}`} fill={entry.color} />
+                ))}
+              </Pie>
+              <Tooltip 
+                contentStyle={{ backgroundColor: '#111', border: 'none', borderRadius: '12px', color: '#fff' }}
+              />
+            </PieChart>
+          </ResponsiveContainer>
+          <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+            <span className="text-xs uppercase text-white/40">{activeTab}</span>
+            <span className="text-2xl font-bold">₹{stats.total}</span>
+          </div>
+        </div>
+        
+        <div className="grid grid-cols-1 gap-4 mt-8">
+          {stats.chartData.map((item) => (
+            <div key={item.name} className="flex items-center justify-between p-4 rounded-2xl bg-white/5 border border-white/10">
+              <div className="flex items-center gap-3">
+                <div className="w-3 h-3 rounded-full" style={{ backgroundColor: item.color }} />
+                <span className="font-bold">{item.name}</span>
+              </div>
+              <div className="text-right">
+                <p className="font-bold">₹{item.value}</p>
+                <p className="text-[10px] text-white/40">{((item.value / stats.total) * 100).toFixed(1)}%</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+    </div>
+  );
+
+  const renderHistory = () => (
+    <div className="space-y-6">
+      <div className="flex items-center justify-between">
+        <h2 className="text-xl font-bold flex items-center gap-2">
+          <History className="w-6 h-6 text-neon-green" />
+          Full History
+        </h2>
+        <p className="text-xs text-white/40 font-mono">{expenses.length} Records</p>
+      </div>
+
+      <div className="space-y-3">
+        {expenses.map((expense) => (
+          <motion.div
+            layout
+            initial={{ opacity: 0 }}
+            animate={{ opacity: 1 }}
+            key={expense.id}
+            className="glass-card p-4 flex items-center justify-between group hover:bg-white/10 transition-colors"
+          >
+            <div className="flex items-center gap-4">
+              <div className={cn(
+                "w-2 h-12 rounded-full",
+                expense.category === 'genuine' && "bg-neon-green",
+                expense.category === 'avoidable' && "bg-neon-yellow",
+                expense.category === 'unnecessary' && "bg-neon-pink",
+                expense.category === 'pending' && "bg-white/20"
+              )} />
+              <div>
+                <p className="font-bold text-lg">{expense.reason}</p>
+                <p className="text-xs text-white/40 font-mono">
+                  {format(expense.timestamp, 'hh:mm a • MMM dd, yyyy')}
+                </p>
+              </div>
+            </div>
+            <div className="text-right">
+              <p className="text-xl font-bold">₹{expense.amount}</p>
+              <span className={cn(
+                "text-[8px] uppercase font-black tracking-tighter px-2 py-0.5 rounded",
+                expense.category === 'genuine' && "bg-neon-green text-black",
+                expense.category === 'avoidable' && "bg-neon-yellow text-black",
+                expense.category === 'unnecessary' && "bg-neon-pink text-white",
+                expense.category === 'pending' && "bg-white/20 text-white"
+              )}>
+                {expense.category}
+              </span>
+            </div>
+          </motion.div>
+        ))}
+        {expenses.length === 0 && (
+          <div className="text-center py-20 text-white/20 uppercase font-bold tracking-widest border-2 border-dashed border-white/5 rounded-3xl">
+            No Records Found
+          </div>
+        )}
+      </div>
+    </div>
+  );
 
   return (
     <div className="min-h-screen bg-dark-bg pb-24 selection:bg-neon-green selection:text-black">
@@ -159,218 +605,10 @@ export default function App() {
       </header>
 
       <main className="max-w-4xl mx-auto px-4 sm:px-6 lg:px-8 space-y-8">
-        {/* AI Input */}
-        <section className="glass-card p-6 neon-shadow-green">
-          <form onSubmit={handleAddExpense} className="space-y-4">
-            <div className="flex items-center gap-2 mb-2">
-              <Sparkles className="w-4 h-4 text-neon-green" />
-              <span className="text-xs font-bold uppercase tracking-tighter text-neon-green">AI Agent Ready</span>
-            </div>
-            <div className="relative">
-              <input
-                type="text"
-                value={inputText}
-                onChange={(e) => setInputText(e.target.value)}
-                placeholder="e.g., Spent 200 on coffee at Starbucks"
-                className="w-full bg-white/5 border border-white/10 rounded-2xl py-4 px-6 focus:outline-none focus:border-neon-green transition-all"
-                disabled={isParsing}
-              />
-              <button
-                type="submit"
-                disabled={isParsing || !inputText}
-                className="absolute right-2 top-2 bottom-2 px-6 bg-neon-green text-black font-bold rounded-xl hover:scale-105 active:scale-95 transition-all disabled:opacity-50 disabled:scale-100"
-              >
-                {isParsing ? '...' : <Plus className="w-6 h-6" />}
-              </button>
-            </div>
-            <p className="text-[10px] text-white/30 font-mono">PROMPT: AMOUNT + REASON + TIME</p>
-          </form>
-        </section>
-
-        {/* AI Insight Section */}
-        <section className="glass-card p-6 border-neon-pink/30 relative overflow-hidden group">
-          <div className="absolute top-0 right-0 p-2">
-            <Sparkles className="w-4 h-4 text-neon-pink animate-pulse" />
-          </div>
-          <div className="flex items-center gap-3 mb-4">
-            <div className="w-8 h-8 rounded-full bg-neon-pink/20 flex items-center justify-center">
-              <Sparkles className="w-4 h-4 text-neon-pink" />
-            </div>
-            <h3 className="text-sm font-bold uppercase tracking-widest text-neon-pink">Doremon's Tea ☕</h3>
-          </div>
-          <div className="min-h-[60px] flex items-center">
-            {isInsightLoading ? (
-              <div className="flex gap-1">
-                <div className="w-2 h-2 bg-neon-pink rounded-full animate-bounce" />
-                <div className="w-2 h-2 bg-neon-pink rounded-full animate-bounce [animation-delay:0.2s]" />
-                <div className="w-2 h-2 bg-neon-pink rounded-full animate-bounce [animation-delay:0.4s]" />
-              </div>
-            ) : (
-              <p className="text-lg font-medium leading-relaxed italic">
-                "{insight || "Add some expenses to get the tea, bestie! 💅"}"
-              </p>
-            )}
-          </div>
-          <button 
-            onClick={fetchInsight}
-            disabled={isInsightLoading}
-            className="mt-4 text-[10px] font-bold uppercase tracking-widest text-white/40 hover:text-neon-pink transition-colors flex items-center gap-1"
-          >
-            Refresh Insight <ChevronRight className="w-3 h-3" />
-          </button>
-        </section>
-
-        {/* Quick Stats Tabs */}
-        <div className="flex gap-2 overflow-x-auto pb-2 custom-scrollbar">
-          {['daily', 'weekly', 'monthly', 'yearly'].map((tab) => (
-            <button
-              key={tab}
-              onClick={() => setActiveTab(tab as any)}
-              className={cn(
-                "px-6 py-2 rounded-full text-xs font-bold uppercase tracking-widest border transition-all whitespace-nowrap",
-                activeTab === tab 
-                  ? "bg-white text-black border-white" 
-                  : "bg-transparent text-white/50 border-white/10 hover:border-white/30"
-              )}
-            >
-              {tab}
-            </button>
-          ))}
-        </div>
-
-        {/* Analytics Card */}
-        <section className="glass-card p-6 grid grid-cols-1 md:grid-cols-2 gap-8 items-center">
-          <div className="h-48 relative">
-            {stats.chartData.length > 0 ? (
-              <ResponsiveContainer width="100%" height="100%">
-                <PieChart>
-                  <Pie
-                    data={stats.chartData}
-                    innerRadius={60}
-                    outerRadius={80}
-                    paddingAngle={5}
-                    dataKey="value"
-                  >
-                    {stats.chartData.map((entry, index) => (
-                      <Cell key={`cell-${index}`} fill={entry.color} />
-                    ))}
-                  </Pie>
-                  <Tooltip 
-                    contentStyle={{ backgroundColor: '#111', border: 'none', borderRadius: '12px', color: '#fff' }}
-                    itemStyle={{ color: '#fff' }}
-                  />
-                </PieChart>
-              </ResponsiveContainer>
-            ) : (
-              <div className="absolute inset-0 flex items-center justify-center text-white/20 text-xs uppercase font-bold">
-                No Data Yet
-              </div>
-            )}
-            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-              <span className="text-[10px] uppercase text-white/40">Total</span>
-              <span className="text-lg font-bold">₹{stats.total}</span>
-            </div>
-          </div>
-          
-          <div className="space-y-4">
-            <div className="flex items-center justify-between p-3 rounded-2xl bg-neon-green/10 border border-neon-green/20">
-              <div className="flex items-center gap-2">
-                <CheckCircle2 className="w-4 h-4 text-neon-green" />
-                <span className="text-sm font-medium">Genuine</span>
-              </div>
-              <span className="font-bold">₹{stats.byCategory.genuine || 0}</span>
-            </div>
-            <div className="flex items-center justify-between p-3 rounded-2xl bg-neon-yellow/10 border border-neon-yellow/20">
-              <div className="flex items-center gap-2">
-                <AlertCircle className="w-4 h-4 text-neon-yellow" />
-                <span className="text-sm font-medium">Avoidable</span>
-              </div>
-              <span className="font-bold">₹{stats.byCategory.avoidable || 0}</span>
-            </div>
-            <div className="flex items-center justify-between p-3 rounded-2xl bg-neon-pink/10 border border-neon-pink/20">
-              <div className="flex items-center gap-2">
-                <XCircle className="w-4 h-4 text-neon-pink" />
-                <span className="text-sm font-medium">Unnecessary</span>
-              </div>
-              <span className="font-bold">₹{stats.byCategory.unnecessary || 0}</span>
-            </div>
-          </div>
-        </section>
-
-        {/* Expense List */}
-        <section className="space-y-4">
-          <div className="flex items-center justify-between">
-            <h2 className="text-lg font-bold flex items-center gap-2">
-              <History className="w-5 h-5 text-neon-green" />
-              Recent Activity
-            </h2>
-            {pendingCount > 0 && (
-              <button 
-                onClick={() => setShowReview(true)}
-                className="text-[10px] font-bold uppercase tracking-widest px-3 py-1 bg-neon-pink text-white rounded-full animate-pulse"
-              >
-                {pendingCount} Pending Review
-              </button>
-            )}
-          </div>
-
-          <div className="space-y-3">
-            <AnimatePresence mode="popLayout">
-              {filteredExpenses.map((expense) => (
-                <motion.div
-                  layout
-                  initial={{ opacity: 0, y: 20 }}
-                  animate={{ opacity: 1, y: 0 }}
-                  exit={{ opacity: 0, scale: 0.95 }}
-                  key={expense.id}
-                  className="glass-card p-4 flex items-center justify-between group hover:bg-white/10 transition-colors"
-                >
-                  <div className="flex items-center gap-4">
-                    <div className={cn(
-                      "w-2 h-12 rounded-full",
-                      expense.category === 'genuine' && "bg-neon-green",
-                      expense.category === 'avoidable' && "bg-neon-yellow",
-                      expense.category === 'unnecessary' && "bg-neon-pink",
-                      expense.category === 'pending' && "bg-white/20"
-                    )} />
-                    <div>
-                      <p className="font-bold text-lg">{expense.reason}</p>
-                      <p className="text-xs text-white/40 font-mono">
-                        {format(expense.timestamp, 'hh:mm a • MMM dd')}
-                      </p>
-                    </div>
-                  </div>
-                  <div className="text-right">
-                    <p className="text-xl font-bold">₹{expense.amount}</p>
-                    <div className="flex gap-1 mt-1">
-                      {expense.category === 'pending' ? (
-                        <div className="flex gap-1">
-                          <button onClick={() => updateCategory(expense.id, 'genuine')} className="p-1 hover:text-neon-green transition-colors"><CheckCircle2 className="w-4 h-4" /></button>
-                          <button onClick={() => updateCategory(expense.id, 'avoidable')} className="p-1 hover:text-neon-yellow transition-colors"><AlertCircle className="w-4 h-4" /></button>
-                          <button onClick={() => updateCategory(expense.id, 'unnecessary')} className="p-1 hover:text-neon-pink transition-colors"><XCircle className="w-4 h-4" /></button>
-                        </div>
-                      ) : (
-                        <span className={cn(
-                          "text-[8px] uppercase font-black tracking-tighter px-2 py-0.5 rounded",
-                          expense.category === 'genuine' && "bg-neon-green text-black",
-                          expense.category === 'avoidable' && "bg-neon-yellow text-black",
-                          expense.category === 'unnecessary' && "bg-neon-pink text-white"
-                        )}>
-                          {expense.category}
-                        </span>
-                      )}
-                    </div>
-                  </div>
-                </motion.div>
-              ))}
-            </AnimatePresence>
-            {filteredExpenses.length === 0 && (
-              <div className="text-center py-12 text-white/20 uppercase font-bold tracking-widest border-2 border-dashed border-white/5 rounded-3xl">
-                No Expenses Found
-              </div>
-            )}
-          </div>
-        </section>
+        {currentView === 'home' && renderHome()}
+        {currentView === 'trends' && renderTrends()}
+        {currentView === 'stats' && renderStats()}
+        {currentView === 'history' && renderHistory()}
       </main>
 
       {/* Review Modal */}
@@ -403,24 +641,42 @@ export default function App() {
                     <div className="grid grid-cols-3 gap-2">
                       <button 
                         onClick={() => updateCategory(ex.id, 'genuine')}
-                        className="flex flex-col items-center gap-2 p-3 rounded-xl bg-neon-green/10 border border-neon-green/20 hover:bg-neon-green hover:text-black transition-all"
+                        className={cn(
+                          "flex flex-col items-center gap-2 p-3 rounded-xl transition-all",
+                          ex.aiSuggestion === 'genuine' 
+                            ? "bg-neon-green/20 border-2 border-neon-green shadow-[0_0_10px_rgba(0,255,0,0.3)]" 
+                            : "bg-white/5 border border-white/10 hover:bg-neon-green/10"
+                        )}
                       >
-                        <CheckCircle2 className="w-5 h-5" />
+                        <CheckCircle2 className="w-5 h-5 text-neon-green" />
                         <span className="text-[10px] font-bold uppercase">Genuine</span>
+                        {ex.aiSuggestion === 'genuine' && <span className="text-[8px] text-neon-green animate-pulse">AI Suggested</span>}
                       </button>
                       <button 
                         onClick={() => updateCategory(ex.id, 'avoidable')}
-                        className="flex flex-col items-center gap-2 p-3 rounded-xl bg-neon-yellow/10 border border-neon-yellow/20 hover:bg-neon-yellow hover:text-black transition-all"
+                        className={cn(
+                          "flex flex-col items-center gap-2 p-3 rounded-xl transition-all",
+                          ex.aiSuggestion === 'avoidable' 
+                            ? "bg-neon-yellow/20 border-2 border-neon-yellow shadow-[0_0_10px_rgba(255,255,0,0.3)]" 
+                            : "bg-white/5 border border-white/10 hover:bg-neon-yellow/10"
+                        )}
                       >
-                        <AlertCircle className="w-5 h-5" />
+                        <AlertCircle className="w-5 h-5 text-neon-yellow" />
                         <span className="text-[10px] font-bold uppercase">Avoidable</span>
+                        {ex.aiSuggestion === 'avoidable' && <span className="text-[8px] text-neon-yellow animate-pulse">AI Suggested</span>}
                       </button>
                       <button 
                         onClick={() => updateCategory(ex.id, 'unnecessary')}
-                        className="flex flex-col items-center gap-2 p-3 rounded-xl bg-neon-pink/10 border border-neon-pink/20 hover:bg-neon-pink hover:text-white transition-all"
+                        className={cn(
+                          "flex flex-col items-center gap-2 p-3 rounded-xl transition-all",
+                          ex.aiSuggestion === 'unnecessary' 
+                            ? "bg-neon-pink/20 border-2 border-neon-pink shadow-[0_0_10px_rgba(255,0,85,0.3)]" 
+                            : "bg-white/5 border border-white/10 hover:bg-neon-pink/10"
+                        )}
                       >
-                        <XCircle className="w-5 h-5" />
+                        <XCircle className="w-5 h-5 text-neon-pink" />
                         <span className="text-[10px] font-bold uppercase">Unnecessary</span>
+                        {ex.aiSuggestion === 'unnecessary' && <span className="text-[8px] text-neon-pink animate-pulse">AI Suggested</span>}
                       </button>
                     </div>
                   </div>
@@ -448,27 +704,54 @@ export default function App() {
       {/* Bottom Nav - Paytm Style */}
       <nav className="fixed bottom-0 left-0 right-0 z-50 glass-card rounded-b-none border-x-0 border-b-0 p-4">
         <div className="max-w-4xl mx-auto flex justify-around items-center">
-          <button className="flex flex-col items-center gap-1 text-neon-green">
+          <button 
+            onClick={() => setCurrentView('home')}
+            className={cn(
+              "flex flex-col items-center gap-1 transition-colors",
+              currentView === 'home' ? "text-neon-green" : "text-white/40 hover:text-white"
+            )}
+          >
             <Wallet className="w-6 h-6" />
             <span className="text-[10px] font-bold uppercase">Home</span>
           </button>
-          <button className="flex flex-col items-center gap-1 text-white/40 hover:text-white transition-colors">
+          <button 
+            onClick={() => setCurrentView('trends')}
+            className={cn(
+              "flex flex-col items-center gap-1 transition-colors",
+              currentView === 'trends' ? "text-neon-green" : "text-white/40 hover:text-white"
+            )}
+          >
             <TrendingUp className="w-6 h-6" />
             <span className="text-[10px] font-bold uppercase">Trends</span>
           </button>
           <div className="relative -top-8">
             <button 
-              onClick={() => window.scrollTo({ top: 0, behavior: 'smooth' })}
+              onClick={() => {
+                setCurrentView('home');
+                window.scrollTo({ top: 0, behavior: 'smooth' });
+              }}
               className="w-16 h-16 bg-neon-green rounded-full flex items-center justify-center text-black neon-shadow-green hover:scale-110 active:scale-95 transition-all"
             >
               <Plus className="w-8 h-8" />
             </button>
           </div>
-          <button className="flex flex-col items-center gap-1 text-white/40 hover:text-white transition-colors">
+          <button 
+            onClick={() => setCurrentView('stats')}
+            className={cn(
+              "flex flex-col items-center gap-1 transition-colors",
+              currentView === 'stats' ? "text-neon-green" : "text-white/40 hover:text-white"
+            )}
+          >
             <PieChartIcon className="w-6 h-6" />
             <span className="text-[10px] font-bold uppercase">Stats</span>
           </button>
-          <button className="flex flex-col items-center gap-1 text-white/40 hover:text-white transition-colors">
+          <button 
+            onClick={() => setCurrentView('history')}
+            className={cn(
+              "flex flex-col items-center gap-1 transition-colors",
+              currentView === 'history' ? "text-neon-green" : "text-white/40 hover:text-white"
+            )}
+          >
             <History className="w-6 h-6" />
             <span className="text-[10px] font-bold uppercase">History</span>
           </button>
