@@ -28,7 +28,7 @@ import {
 } from 'recharts';
 import { format, isSameDay, isSameWeek, isSameMonth, isSameYear, startOfDay, subDays } from 'date-fns';
 import { motion, AnimatePresence } from 'motion/react';
-import { parseExpense, getSpendingInsight } from './services/geminiService';
+import { parseExpense, getSpendingInsight } from './services/aiService';
 import { Expense, Category } from './types';
 import { clsx, type ClassValue } from 'clsx';
 import { twMerge } from 'tailwind-merge';
@@ -46,8 +46,13 @@ const COLORS = {
 
 export default function App() {
   const [expenses, setExpenses] = useState<Expense[]>(() => {
-    const saved = localStorage.getItem('zenz_expenses');
-    return saved ? JSON.parse(saved) : [];
+    try {
+      const saved = localStorage.getItem('zenz_expenses');
+      return saved ? JSON.parse(saved) : [];
+    } catch (e) {
+      console.error("Failed to parse expenses from localStorage", e);
+      return [];
+    }
   });
   const [inputText, setInputText] = useState('');
   const [isParsing, setIsParsing] = useState(false);
@@ -79,23 +84,30 @@ export default function App() {
     if (!inputText.trim()) return;
 
     setIsParsing(true);
-    const parsed = await parseExpense(inputText);
-    setIsParsing(false);
+    try {
+      const parsed = await parseExpense(inputText);
+      setIsParsing(false);
 
-    if (parsed) {
-      const newExpense: Expense = {
-        id: Math.random().toString(36).substr(2, 9),
-        amount: parsed.amount,
-        reason: parsed.reason,
-        timestamp: parsed.timestamp,
-        category: 'pending',
-        aiSuggestion: parsed.suggestedCategory,
-        rawText: inputText
-      };
-      setExpenses(prev => [newExpense, ...prev]);
-      setInputText('');
-      // Automatically show review if it's the first pending one or just to prompt user
-      setShowReview(true);
+      if (parsed) {
+        const newExpense: Expense = {
+          id: Math.random().toString(36).substr(2, 9),
+          amount: parsed.amount,
+          reason: parsed.reason,
+          timestamp: parsed.timestamp,
+          category: 'pending',
+          aiSuggestion: parsed.suggestedCategory,
+          rawText: inputText
+        };
+        setExpenses(prev => [newExpense, ...prev]);
+        setInputText('');
+        setShowReview(true);
+      } else {
+        alert("Doremon couldn't parse that. Try: 'Spent 200 on pizza'");
+      }
+    } catch (error) {
+      setIsParsing(false);
+      console.error("Error adding expense:", error);
+      alert("Something went wrong. Check your connection!");
     }
   };
 
@@ -167,7 +179,9 @@ export default function App() {
       const day = format(ex.timestamp, 'EEEE');
       days[day] = (days[day] || 0) + ex.amount;
     });
-    return Object.entries(days).map(([name, value]) => ({ name, value }));
+    const result = Object.entries(days).map(([name, value]) => ({ name, value }));
+    const max = Math.max(...result.map(d => d.value), 0);
+    return { data: result, max: max || 1 };
   }, [expenses]);
 
   const renderHome = () => (
@@ -433,7 +447,7 @@ export default function App() {
       <section className="glass-card p-6">
         <h2 className="text-lg font-bold mb-6">Spending by Day</h2>
         <div className="space-y-4">
-          {statsByDay.map((day) => (
+          {statsByDay.data.map((day) => (
             <div key={day.name} className="space-y-2">
               <div className="flex justify-between text-xs font-bold uppercase tracking-widest">
                 <span>{day.name}</span>
@@ -442,12 +456,15 @@ export default function App() {
               <div className="h-2 w-full bg-white/5 rounded-full overflow-hidden">
                 <motion.div 
                   initial={{ width: 0 }}
-                  animate={{ width: `${(day.value / Math.max(...statsByDay.map(d => d.value))) * 100}%` }}
+                  animate={{ width: `${(day.value / statsByDay.max) * 100}%` }}
                   className="h-full bg-neon-green"
                 />
               </div>
             </div>
           ))}
+          {statsByDay.data.length === 0 && (
+            <p className="text-center text-white/20 text-xs uppercase font-bold py-4">No data yet</p>
+          )}
         </div>
       </section>
     </div>
@@ -511,7 +528,9 @@ export default function App() {
               </div>
               <div className="text-right">
                 <p className="font-bold">₹{item.value}</p>
-                <p className="text-[10px] text-white/40">{((item.value / stats.total) * 100).toFixed(1)}%</p>
+                <p className="text-[10px] text-white/40">
+                  {stats.total > 0 ? ((item.value / stats.total) * 100).toFixed(1) : '0.0'}%
+                </p>
               </div>
             </div>
           ))}
